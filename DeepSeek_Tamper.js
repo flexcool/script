@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         DeepSeek qwen-code Enhanced Auto Send (Optimized)
+// @name         DeepSeek qwen-code Enhanced Auto Send (Optimized + Direct Reply)
 // @namespace    http://tampermonkey.net/
-// @version      0.2
-// @description  SSE监控 + MCP客户端（优化start/end捕获）
+// @version      0.5
+// @description  SSE监控 + MCP客户端（优化start/end捕获，增加手动触发面板，支持直接回复，UI适配）
 // @author       Your Name
 // @match        https://chat.deepseek.com/*
 // @grant        GM_xmlhttpRequest
@@ -29,22 +29,12 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
         overlayText = document.createElement('div');
         overlayText.id = 'mcp-overlay-text';
         overlayText.innerHTML = '🔄 MCP命令调用中...<br>等待返回结果';
-        overlayText.style.cssText = `background-color: rgba(0, 0, 0, 0.8); padding: 20px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);`;
+        overlayText.style.cssText = `background-color: rgba(0, 0, 0, 0.8); padding: 20px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5); position: relative;`;
 
         const closeBtn = document.createElement('button');
         closeBtn.textContent = '×';
-        closeBtn.style.cssText = `
-            position: absolute;
-            top: 8px;
-            right: 12px;
-            background: transparent;
-            border: none;
-            color: #fff;
-            font-size: 20px;
-            cursor: pointer;
-        `;
+        closeBtn.style.cssText = `position: absolute; top: 8px; right: 12px; background: transparent; border: none; color: #fff; font-size: 20px; cursor: pointer;`;
         closeBtn.addEventListener('click', hideOverlay);
-        overlayText.style.position = 'relative';
         overlayText.appendChild(closeBtn);
 
         overlay.appendChild(overlayText);
@@ -54,14 +44,145 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
     function showOverlay() { if (!overlay) createOverlay(); overlay.style.display = 'flex'; }
     function hideOverlay() { if (overlay) overlay.style.display = 'none'; }
 
-    // ================= [保留] 初始化按钮逻辑 =================
+    // ================= [优化] 手动触发面板逻辑 (DeepSeek UI 风格) =================
+    let panelVisible = false;
+
+    function createManualPanel() {
+        if (document.getElementById('mcp-manual-panel')) return;
+
+        const panel = document.createElement('div');
+        panel.id = 'mcp-manual-panel';
+        panel.style.cssText = `
+            position: fixed; top: 65px; right: 20px; z-index: 10001;
+            background: #1e1e1e; color: #d1d5db; border: 1px solid #374151;
+            border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+            padding: 16px; width: 380px; display: none; font-family: system-ui, -apple-system, sans-serif;
+        `;
+        panel.innerHTML = `
+            <div style="font-size: 14px; font-weight: 600; margin-bottom: 10px; color: #f3f4f6; display: flex; align-items: center; gap: 6px;">
+                <span>⚡</span> 手动触发 MCP 工具
+            </div>
+            <textarea id="mcp-manual-input" placeholder='例如: start{"name":"get_role_card","arguments":{}}end'
+                style="width: 100%; height: 90px; background: #111827; border: 1px solid #374151; border-radius: 8px; padding: 10px; font-size: 13px; color: #e5e7eb; resize: vertical; box-sizing: border-box; outline: none; transition: border-color 0.2s;"></textarea>
+            <button id="mcp-manual-submit" style="
+                margin-top: 10px; width: 100%; padding: 10px; background-color: #374151; color: #f9fafb;
+                border: 1px solid #4b5563; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; transition: background 0.2s;
+            ">执行并直接回复</button>
+            <div id="mcp-manual-msg" style="margin-top: 8px; font-size: 12px; color: #9ca3af; word-break: break-all; max-height: 120px; overflow-y: auto; line-height: 1.4;"></div>
+        `;
+        document.body.appendChild(panel);
+
+        // 输入框聚焦效果
+        const input = document.getElementById('mcp-manual-input');
+        input.addEventListener('focus', () => input.style.borderColor = '#60a5fa');
+        input.addEventListener('blur', () => input.style.borderColor = '#374151');
+
+        // 绑定提交事件
+        document.getElementById('mcp-manual-submit').addEventListener('click', async () => {
+            const msgDiv = document.getElementById('mcp-manual-msg');
+            const submitBtn = document.getElementById('mcp-manual-submit');
+            const rawText = input.value.trim();
+
+            if (!rawText) {
+                msgDiv.style.color = '#f87171';
+                msgDiv.textContent = '输入内容不能为空';
+                return;
+            }
+
+            const match = rawText.match(/start:\s*({[\s\S]*?})\s*end/);
+            if (!match) {
+                msgDiv.style.color = '#f87171';
+                msgDiv.textContent = '格式错误，请确保包含 start:{...}end';
+                return;
+            }
+
+            try {
+                const toolData = JSON.parse(match[1]);
+                if (!toolData.name) throw new Error('缺少 name 字段');
+
+                msgDiv.style.color = '#60a5fa';
+                msgDiv.textContent = '⏳ 正在执行...';
+                submitBtn.disabled = true;
+                submitBtn.style.opacity = '0.7';
+
+                const result = await execstart(toolData.name, toolData.arguments || {});
+
+                let replyText = "";
+                if (result.success) {
+                    replyText = result.result?.content?.[0]?.text || result.result?.stdout || JSON.stringify(result.result);
+                    msgDiv.style.color = '#34d399';
+                    msgDiv.textContent = '✅ 执行成功，正在发送回复...';
+                } else {
+                    replyText = `❌ 工具 ${toolData.name} 执行失败: ${result.error}`;
+                    msgDiv.style.color = '#f87171';
+                    msgDiv.textContent = replyText;
+                }
+
+                if (replyText) {
+                    simulateTypeAndSend(replyText);
+                }
+
+                input.value = '';
+            } catch (e) {
+                msgDiv.style.color = '#f87171';
+                msgDiv.textContent = '❌ 解析或执行异常: ' + e.message;
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.style.opacity = '1';
+            }
+        });
+    }
+
+    function toggleManualPanel() {
+        panelVisible = !panelVisible;
+        const panel = document.getElementById('mcp-manual-panel');
+        if (panel) panel.style.display = panelVisible ? 'block' : 'none';
+    }
+
+    // ================= [修改] 初始化按钮逻辑（拆分为两个按钮） =================
     function createInitButton() {
-        const button = document.createElement('div');
-        button.id = 'mcp-init-button';
-        button.innerHTML = 'MCP 初始化';
-        button.style.cssText = `position: fixed; top: 20px; right: 20px; z-index: 10000; background-color: #4CAF50; color: white; padding: 10px 15px; border-radius: 5px; cursor: pointer; font-family: Arial, sans-serif; font-size: 14px; box-shadow: 0 4px 8px rgba(0,0,0,0.2); transition: background-color 0.3s;`;
-        button.addEventListener('click', initializeMCP);
-        document.body.appendChild(button);
+        const container = document.createElement('div');
+        container.id = 'mcp-btn-container';
+        container.style.cssText = `position: fixed; top: 20px; right: 20px; z-index: 10002; display: flex; gap: 8px; font-family: system-ui, -apple-system, sans-serif;`;
+
+        // 1. 初始化按钮
+        const initBtn = document.createElement('div');
+        initBtn.innerHTML = '🔄 初始化';
+        initBtn.style.cssText = `
+            background-color: #374151; color: #f9fafb; padding: 8px 14px;
+            border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.2); transition: background 0.2s; user-select: none; border: 1px solid #4b5563;
+        `;
+        initBtn.addEventListener('mouseenter', () => initBtn.style.backgroundColor = '#4b5563');
+        initBtn.addEventListener('mouseleave', () => initBtn.style.backgroundColor = '#374151');
+        initBtn.addEventListener('click', () => {
+            initializeMCP();
+            initBtn.innerHTML = '✅ 已初始化';
+            setTimeout(() => { initBtn.innerHTML = '🔄 初始化'; }, 2000);
+        });
+
+        // 2. 手动面板切换按钮
+        const toggleBtn = document.createElement('div');
+        toggleBtn.innerHTML = '⚡ 手动';
+        toggleBtn.style.cssText = `
+            background-color: #374151; color: #f9fafb; padding: 8px 14px;
+            border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.2); transition: background 0.2s; user-select: none; border: 1px solid #4b5563;
+        `;
+        toggleBtn.addEventListener('mouseenter', () => toggleBtn.style.backgroundColor = '#4b5563');
+        toggleBtn.addEventListener('mouseleave', () => {
+            toggleBtn.style.backgroundColor = panelVisible ? '#2563eb' : '#374151';
+        });
+        toggleBtn.addEventListener('click', () => {
+            createManualPanel();
+            toggleManualPanel();
+            // 激活状态变色
+            toggleBtn.style.backgroundColor = panelVisible ? '#2563eb' : '#374151';
+        });
+
+        container.appendChild(initBtn);
+        container.appendChild(toggleBtn);
+        document.body.appendChild(container);
     }
 
     // ================= [保留] 模拟输入与发送逻辑 =================
@@ -74,9 +195,7 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
         textarea.focus();
         const isPlaceholder = message === window.MCP_SEND_PLACEHOLDER;
         const fullMsg = isPlaceholder ? message : (window.commandResults ? (window.commandResults + "\n" + message) : message);
-        if (!isPlaceholder) {
-            window.commandResults = '';
-        }
+        if (!isPlaceholder) window.commandResults = '';
 
         if (textarea.isContentEditable) {
             textarea.innerHTML = '';
@@ -99,7 +218,7 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
         }, 300);
     }
 
-    // ================= 初始化函数 - 使用本地角色卡 =================
+    // ================= [保留] 初始化函数 =================
     function initializeMCP() {
         window.commandResults = '\n📊 MCP初始化成功\n---\n正在获取角色卡...\n---\n';
         simulateTypeAndSend(window.MCP_SEND_PLACEHOLDER);
@@ -109,145 +228,88 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
         }).catch(e => {
             console.error('❌ 角色卡获取失败:', e);
         });
-
-        const button = document.getElementById('mcp-init-button');
-        if (button) {
-            button.textContent = '初始化成功!';
-            button.style.backgroundColor = '#2196F3';
-            setTimeout(() => button.remove(), 2000);
-        }
     }
 
     // ================= [核心优化] 工具调用检测逻辑 =================
     let activeToolCalls = [];
 
-    // --- 优化1: 更精确的Start/End匹配逻辑 ---
     function findToolCallMarkers(text) {
         const markers = [];
-        const startRegex = /start:\s*({[^]*?})\s*end(?!\w)/g; // 匹配 start: {...} end
+        const startRegex = /start:\s*({[\s\S]*?})\s*end(?!\w)/g;
         let match;
-
         while ((match = startRegex.exec(text)) !== null) {
             const fullMatch = match[0];
             const jsonContent = match[1];
             const startIndex = match.index;
             const endIndex = startIndex + fullMatch.length;
-
-            // 尝试解析JSON，确保其有效性
             try {
                 const parsedArgs = JSON.parse(jsonContent);
-                markers.push({
-                    start: startIndex,
-                    end: endIndex,
-                    jsonContent: parsedArgs,
-                    rawMatch: fullMatch
-                });
+                markers.push({ start: startIndex, end: endIndex, jsonContent: parsedArgs });
             } catch (e) {
                 console.warn("发现无效JSON格式的start/end块:", jsonContent);
-                // 即使JSON无效，也可以记录位置，但不执行
-                markers.push({
-                    start: startIndex,
-                    end: endIndex,
-                    jsonContent: null,
-                    rawMatch: fullMatch,
-                    invalidJson: true
-                });
             }
         }
         return markers;
     }
 
-    // --- 优化2: 改进的状态管理和内容处理 ---
     function checkToolCalls(state) {
-        // 获取当前累积的内容
         const currentContent = state.contentAccumulator;
-
-        // 查找新的start/end标记
         const potentialMarkers = findToolCallMarkers(currentContent);
-
-        // 筛选出之前未处理过的标记
         const newMarkers = potentialMarkers.filter(marker => marker.start >= (state.lastProcessedIndex || 0));
 
-        if (newMarkers.length > 0) {
-            console.log(`[MCP] 检测到 ${newMarkers.length} 个新工具调用`);
-        }
+        if (newMarkers.length > 0) console.log(`[MCP] 检测到 ${newMarkers.length} 个新工具调用`);
 
         for (const marker of newMarkers) {
-            if (marker.invalidJson) {
-                console.warn("跳过无效JSON的工具调用");
-                continue;
-            }
-
             const toolData = marker.jsonContent;
-            if (!toolData || !toolData.name) {
-                console.warn("工具调用缺少名称或参数", toolData);
-                continue;
-            }
+            if (!toolData || !toolData.name) continue;
 
-            console.log("[MCP] 执行工具:", toolData.name, toolData.arguments);
+            console.log("[MCP] 自动执行工具:", toolData.name, toolData.arguments);
             executeTool(toolData.name, toolData.arguments || {});
 
-            // 替换已处理的标记，防止重复处理
-            // 使用特殊标记替换原始的start/end块，而不是直接删除
             const replacement = `\n[PROCESSED_MCP_CALL:${toolData.name}]\n`;
             state.contentAccumulator = state.contentAccumulator.substring(0, marker.start) + replacement + state.contentAccumulator.substring(marker.end);
-
-            // 更新上次处理的位置
             state.lastProcessedIndex = marker.start + replacement.length;
-
-            // 注意：这里不立即递归调用checkToolCalls，而是让事件循环处理完当前批次后再检查。
-            // 因为内容已经修改，下次processBuffer调用时会重新处理。
         }
 
-        // 控制缓冲区大小
-        const MAX_BUFFER = 2 * 1024 * 1024; // 2MB
-        const TRIM_TO = 1 * 1024 * 1024;    // 1MB
+        const MAX_BUFFER = 2 * 1024 * 1024;
+        const TRIM_TO = 1 * 1024 * 1024;
         if (state.contentAccumulator.length > MAX_BUFFER) {
             state.contentAccumulator = state.contentAccumulator.slice(-TRIM_TO);
-            // 重置处理索引，因为它可能已经无效
             delete state.lastProcessedIndex;
         }
     }
 
-
-    // ================= [保留并微调] SSE处理逻辑 =================
+    // ================= [保留] SSE处理逻辑 =================
     function processBuffer(state) {
         const lines = state.sseBuffer.split('\n');
-        state.sseBuffer = lines.pop() || ''; // 保留不完整行
+        state.sseBuffer = lines.pop() || '';
 
         for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed || !trimmed.startsWith('data: ')) continue;
-
             const jsonStr = trimmed.substring(6);
             if (jsonStr === '[DONE]') continue;
 
             try {
                 const json = JSON.parse(jsonStr);
                 let text = '';
-
                 if (json.p === 'response/fragments/-1/content' && json.o === 'APPEND' && typeof json.v === 'string') {
                     text = json.v;
                 } else if (json.p === 'response' && json.o === 'BATCH' && Array.isArray(json.v)) {
                     for (const op of json.v) {
                         if (op.p === 'fragments' && op.o === 'APPEND' && Array.isArray(op.v)) {
                             for (const frag of op.v) {
-                                if (frag && typeof frag.content === 'string') {
-                                    text += frag.content;
-                                }
+                                if (frag && typeof frag.content === 'string') text += frag.content;
                             }
                         }
                     }
                 } else {
-                    // 保持原有提取逻辑作为后备
                     function deepExtract(obj) {
                         if (typeof obj === 'string') return obj;
                         if (Array.isArray(obj)) return obj.map(deepExtract).join('');
                         if (typeof obj === 'object' && obj !== null) {
                             const keys = ['v', 'content', 'text', 'fragments'];
-                            for (const k of keys) {
-                                if (obj[k]) return deepExtract(obj[k]);
-                            }
+                            for (const k of keys) if (obj[k]) return deepExtract(obj[k]);
                             return Object.values(obj).map(deepExtract).join('');
                         }
                         return '';
@@ -257,28 +319,20 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
 
                 if (text) {
                     state.contentAccumulator += text;
-                    // 在内容添加后立即检查，以提高响应速度
                     checkToolCalls(state);
                 }
-            } catch (e) {
-                // 忽略解析错误
-            }
+            } catch (e) {}
         }
     }
-
 
     // ================= [保留] 工具执行逻辑 =================
     async function executeTool(name, args) {
         const callId = Date.now() + Math.random();
         activeToolCalls.push(callId);
-        if (name !== 'get_role_card') {
-            showOverlay();
-        }
+        if (name !== 'get_role_card') showOverlay();
 
         try {
-            const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => reject(new Error('工具执行超时')), 60000);
-            });
+            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('工具执行超时')), 60000));
             const result = await Promise.race([execstart(name, args), timeoutPromise]);
             let text = "执行完成";
 
@@ -297,6 +351,7 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
             window.commandResults += `\n❌ 工具 ${name} 异常: ${e.message}\n---\n`;
         } finally {
             activeToolCalls = activeToolCalls.filter(id => id !== callId);
+            if (name !== 'get_role_card') hideOverlay();
         }
     }
 
@@ -345,7 +400,6 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
                 processedIndex: 0,
                 sseBuffer: '',
                 contentAccumulator: '',
-                // 添加用于跟踪上次处理位置的新属性
                 lastProcessedIndex: 0
             };
 
@@ -362,15 +416,10 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
             this.addEventListener('loadend', () => {
                 let checkCount = 0;
                 const MAX_CHECKS = 240;
-
                 const finalCheck = setInterval(() => {
                     checkCount++;
                     if (activeToolCalls.length === 0 || checkCount >= MAX_CHECKS) {
                         clearInterval(finalCheck);
-                        if (checkCount >= MAX_CHECKS) {
-                            console.warn('⚠️ 工具执行超时，强制发送结果');
-                            window.commandResults += `\n⚠️ 部分工具执行超时\n---\n`;
-                        }
                         if (window.commandResults) {
                             hideOverlay();
                             simulateTypeAndSend(window.MCP_SEND_PLACEHOLDER);
@@ -384,7 +433,11 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
 
     // ================= [保留] MCP客户端 =================
     class UniversalMCPClient {
-        constructor(serverUrl) { this.serverUrl = serverUrl; this.requestId = 1; }
+        constructor(serverUrl) {
+            this.serverUrl = serverUrl;
+            this.requestId = 1;
+        }
+
         async call(toolName, params) {
             return new Promise((resolve) => {
                 GM_xmlhttpRequest({

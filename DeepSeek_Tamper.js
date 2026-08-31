@@ -1,8 +1,9 @@
+
 // ==UserScript==
-// @name         DeepSeek qwen-code Enhanced Auto Send (Optimized + Direct Reply 0.6)
+// @name         DeepSeek qwen-code Enhanced Auto Send (Optimized + Direct Reply)
 // @namespace    http://tampermonkey.net/
-// @version      0.6
-// @description  SSE监控 + MCP客户端（优化start/end捕获，增加手动触发面板，支持直接回复，UI适配）
+// @version      0.8
+// @description  SSE监控 + MCP客户端（修复 SSE 流结束时最后数据丢失 + 缓冲区未刷新的时序 bug）
 // @author       Your Name
 // @match        https://chat.deepseek.com/*
 // @grant        GM_xmlhttpRequest
@@ -44,7 +45,7 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
     function showOverlay() { if (!overlay) createOverlay(); overlay.style.display = 'flex'; }
     function hideOverlay() { if (overlay) overlay.style.display = 'none'; }
 
-    // ================= [优化] 手动触发面板逻辑 (DeepSeek UI 风格) =================
+    // ================= [优化] 手动触发面板逻辑 =================
     let panelVisible = false;
 
     function createManualPanel() {
@@ -72,12 +73,10 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
         `;
         document.body.appendChild(panel);
 
-        // 输入框聚焦效果
         const input = document.getElementById('mcp-manual-input');
         input.addEventListener('focus', () => input.style.borderColor = '#60a5fa');
         input.addEventListener('blur', () => input.style.borderColor = '#374151');
 
-        // 绑定提交事件
         document.getElementById('mcp-manual-submit').addEventListener('click', async () => {
             const msgDiv = document.getElementById('mcp-manual-msg');
             const submitBtn = document.getElementById('mcp-manual-submit');
@@ -89,15 +88,16 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
                 return;
             }
 
-            const match = rawText.match(/start:?\s*({[\s\S]*?})\s*end/);
-            if (!match) {
+            // 【修复】手动面板也使用 findToolCallMarkers，保持一致的检测逻辑
+            const markers = findToolCallMarkers(rawText);
+            if (markers.length === 0) {
                 msgDiv.style.color = '#f87171';
-                msgDiv.textContent = '格式错误，请确保包含 start:{...}end';
+                msgDiv.textContent = '格式错误，请确保包含 start{...}end 或 start:{...}end';
                 return;
             }
 
             try {
-                const toolData = JSON.parse(match[1]);
+                const toolData = markers[0].jsonContent;
                 if (!toolData.name) throw new Error('缺少 name 字段');
 
                 msgDiv.style.color = '#60a5fa';
@@ -139,13 +139,12 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
         if (panel) panel.style.display = panelVisible ? 'block' : 'none';
     }
 
-    // ================= [修改] 初始化按钮逻辑（拆分为两个按钮） =================
+    // ================= [保留] 初始化按钮逻辑 =================
     function createInitButton() {
         const container = document.createElement('div');
         container.id = 'mcp-btn-container';
         container.style.cssText = `position: fixed; top: 20px; right: 20px; z-index: 10002; display: flex; gap: 8px; font-family: system-ui, -apple-system, sans-serif;`;
 
-        // 1. 初始化按钮
         const initBtn = document.createElement('div');
         initBtn.innerHTML = '🔄 初始化';
         initBtn.style.cssText = `
@@ -161,7 +160,6 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
             setTimeout(() => { initBtn.innerHTML = '🔄 初始化'; }, 2000);
         });
 
-        // 2. 手动面板切换按钮
         const toggleBtn = document.createElement('div');
         toggleBtn.innerHTML = '⚡ 手动';
         toggleBtn.style.cssText = `
@@ -176,7 +174,6 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
         toggleBtn.addEventListener('click', () => {
             createManualPanel();
             toggleManualPanel();
-            // 激活状态变色
             toggleBtn.style.backgroundColor = panelVisible ? '#2563eb' : '#374151';
         });
 
@@ -230,34 +227,91 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
         });
     }
 
-    // ================= [核心优化] 工具调用检测逻辑 =================
+    // ================= [核心修复 v0.7] 工具调用检测逻辑 =================
     let activeToolCalls = [];
 
+    /**
+     * findToolCallMarkers v0.6 - 三处关键修复：
+     *
+     * 修复1: 移除 end 后的 (?!\w) 断言
+     *   原来: /^\s*end(?!\w)/ → "endstart" 中 "end" 后面是 's' (word char) → 匹配失败
+     *   现在: /^\s*end/ → "endstart" 中 "end" 正常匹配，不再被后面的 "start" 阻断
+     *
+     * 修复2: 花括号计数感知 JSON 字符串
+     *   原来: 纯粹数 { 和 }，字符串内的 } 会导致提前结束
+     *   现在: 跟踪 inString 和 escape 状态，字符串内的花括号被忽略
+     *
+     * 修复3: 词边界检查兼容 "endstart" 场景
+     *   原来: 前一个字符是字母就跳过（会误杀 "endstart" 中的第二个 start）
+     *   现在: 前三个字符恰好是 "end" 时允许匹配，其他字母前缀（如 "restart"）仍跳过
+     */
     function findToolCallMarkers(text) {
         const markers = [];
-        // 用 startTag 正则定位 "start" 或 "start:" 后的 '{'，然后用花括号计数法精确提取完整 JSON
         const startTagRegex = /start:?\s*\{/g;
         let tagMatch;
+
         while ((tagMatch = startTagRegex.exec(text)) !== null) {
             const startIndex = tagMatch.index;
-            // 找到 '{' 的位置，开始花括号计数
+
+            // 【修复3】词边界检查：防止 "restart{" 误匹配，但允许 "endstart{"
+            if (startIndex > 0 && /[a-zA-Z]/.test(text[startIndex - 1])) {
+                // 如果前面恰好是 "end" 关键词，允许匹配（连续标记场景）
+                if (startIndex >= 3 && text.substring(startIndex - 3, startIndex).toLowerCase() === 'end') {
+                    // OK: "endstart{" 是合法的连续标记
+                } else {
+                    // 跳过: "restart{"、"upstart{" 等
+                    continue;
+                }
+            }
+
+            // 找到 '{' 的位置
             const braceStart = text.indexOf('{', tagMatch.index);
             if (braceStart === -1) continue;
 
+            // 【修复2】字符串感知花括号计数
             let depth = 0;
             let jsonEnd = -1;
+            let inString = false;
+            let escape = false;
+
             for (let i = braceStart; i < text.length; i++) {
-                if (text[i] === '{') depth++;
-                else if (text[i] === '}') {
-                    depth--;
-                    if (depth === 0) { jsonEnd = i + 1; break; }
+                const ch = text[i];
+
+                if (escape) {
+                    escape = false;
+                    continue;
+                }
+
+                if (ch === '\\' && inString) {
+                    escape = true;
+                    continue;
+                }
+
+                if (ch === '"') {
+                    inString = !inString;
+                    continue;
+                }
+
+                if (!inString) {
+                    if (ch === '{') depth++;
+                    else if (ch === '}') {
+                        depth--;
+                        if (depth === 0) {
+                            jsonEnd = i + 1;
+                            break;
+                        }
+                    }
                 }
             }
-            if (jsonEnd === -1) continue;
 
-            // 检查 '}' 后面是否紧跟 'end'（允许中间有空白）
+            if (jsonEnd === -1) continue; // 花括号未闭合
+
+            // 检查 '}' 后面是否紧跟 'end'
             const afterBrace = text.substring(jsonEnd);
-            const endMatch = afterBrace.match(/^\s*end(?!\w)/);
+            // 【修复1】移除 (?!\w)！这是 "隔一个漏一个" 的直接原因
+            // 当 LLM 输出 start{A}endstart{B}end 时，
+            // 原来的 (?!\w) 会因为 "end" 后面紧跟 "s" 而匹配失败
+            const endMatch = afterBrace.match(/^\s*end/);
             if (!endMatch) continue;
 
             const endIndex = jsonEnd + endMatch[0].length;
@@ -266,10 +320,11 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
             try {
                 const parsedArgs = JSON.parse(jsonContent);
                 markers.push({ start: startIndex, end: endIndex, jsonContent: parsedArgs });
-                // 跳到当前 marker 结束之后继续搜索，避免重叠匹配
+                // 跳到当前 marker 结束之后继续搜索
                 startTagRegex.lastIndex = endIndex;
             } catch (e) {
-                console.warn("发现无效JSON格式的start/end块:", jsonContent);
+                console.warn("[MCP] 无效JSON的start/end块:", jsonContent, e.message);
+                // exec 已经自动推进了 lastIndex，继续搜索
             }
         }
         return markers;
@@ -280,9 +335,17 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
         const potentialMarkers = findToolCallMarkers(currentContent);
         const newMarkers = potentialMarkers.filter(marker => marker.start >= (state.lastProcessedIndex || 0));
 
-        if (newMarkers.length > 0) console.log(`[MCP] 检测到 ${newMarkers.length} 个新工具调用`);
+        if (newMarkers.length > 0) {
+            console.log(`[MCP v0.8] 检测到 ${newMarkers.length} 个新工具调用:`, newMarkers.map(m => m.jsonContent.name),
+                `| lastProcessedIndex=${state.lastProcessedIndex} | 总标记数=${potentialMarkers.length} | 内容长度=${currentContent.length}`);
+        }
+        // 诊断日志：即使没有新 marker，如果有潜在标记也输出
+        if (newMarkers.length === 0 && potentialMarkers.length > 0) {
+            console.log(`[MCP v0.8] 发现 ${potentialMarkers.length} 个标记但都被过滤（已处理过）`,
+                potentialMarkers.map(m => ({name: m.jsonContent.name, start: m.start, filtered: m.start < (state.lastProcessedIndex||0)})));
+        }
 
-        // 【关键修复】从后往前处理 marker，替换后面的不影响前面的位置
+        // 从后往前处理，替换后面的不影响前面的位置
         for (let i = newMarkers.length - 1; i >= 0; i--) {
             const marker = newMarkers[i];
             const toolData = marker.jsonContent;
@@ -292,18 +355,37 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
             executeTool(toolData.name, toolData.arguments || {});
 
             const replacement = `\n[PROCESSED_MCP_CALL:${toolData.name}]\n`;
-            state.contentAccumulator = state.contentAccumulator.substring(0, marker.start) + replacement + state.contentAccumulator.substring(marker.end);
+            state.contentAccumulator = state.contentAccumulator.substring(0, marker.start)
+                + replacement
+                + state.contentAccumulator.substring(marker.end);
         }
-        // 更新 lastProcessedIndex：重新扫描，找到第一个未处理的 marker 位置
+
+        // 【核心修复 v0.7】安全更新 lastProcessedIndex
+        //
+        // 原来的 bug：处理完 marker 后直接把 lastProcessedIndex 设为 contentAccumulator.length。
+        // 当 SSE 流中两个工具调用紧挨着输出时（如 start{A}end ... start{B}），
+        // A 的 "end" 和 B 的 "start{...}" 可能在同一个 chunk 中到达。
+        // 此时 A 被处理并替换，但 B 只有 "start{...}" 还没有 "end"（不完整 marker）。
+        // 原代码把 lastProcessedIndex 设为 content 末尾（已经超过了 B 的 start 位置），
+        // 导致下一个 chunk 中 B 的 "end" 到达时，B.start < lastProcessedIndex → 被过滤掉！
+        // 这就是"隔一个漏一个"的真正原因。
+        //
+        // 修复：扫描剩余内容中是否还有 "start" 标签（可能是不完整 marker），
+        // 如果有，lastProcessedIndex 设为该位置，确保后续 "end" 到达时能重新检测到。
         if (newMarkers.length > 0) {
-            const recheck = findToolCallMarkers(state.contentAccumulator);
-            if (recheck.length === 0) {
-                state.lastProcessedIndex = state.contentAccumulator.length;
+            const firstStartRegex = /start:?\s*\{/;
+            const firstStartMatch = state.contentAccumulator.match(firstStartRegex);
+            if (firstStartMatch) {
+                // 还有 "start" 标签存在（可能是未完整的 marker），从该位置开始重新检查
+                state.lastProcessedIndex = firstStartMatch.index;
+                console.log(`[MCP] lastProcessedIndex=${firstStartMatch.index}（存在未完成的 start 标记）`);
             } else {
-                state.lastProcessedIndex = recheck[0].start;
+                // 没有任何 "start" 标签了，安全地跳到末尾
+                state.lastProcessedIndex = state.contentAccumulator.length;
             }
         }
 
+        // 缓冲区大小控制
         const MAX_BUFFER = 2 * 1024 * 1024;
         const TRIM_TO = 1 * 1024 * 1024;
         if (state.contentAccumulator.length > MAX_BUFFER) {
@@ -436,17 +518,57 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
                 lastProcessedIndex: 0
             };
 
-            this.addEventListener('progress', () => {
-                if (this.readyState === 3 && this.responseText && this._mcpSSEState) {
+            // 【修复 v0.8 - Bug1】同时处理 readyState 3 和 4
+            // 原来只处理 readyState === 3，当 XHR 完成时 readyState 变为 4，
+            // 最后一批数据（可能包含工具调用标记）被永久丢失！
+            // 这就是为什么"最后一个工具调用总是漏掉"的原因。
+            const processSSEData = () => {
+                if (this.responseText && this._mcpSSEState) {
                     const state = this._mcpSSEState;
-                    const newData = this.responseText.substring(state.processedIndex);
-                    state.processedIndex = this.responseText.length;
-                    state.sseBuffer += newData;
-                    processBuffer(state);
+                    if (state.processedIndex < this.responseText.length) {
+                        const newData = this.responseText.substring(state.processedIndex);
+                        state.processedIndex = this.responseText.length;
+                        state.sseBuffer += newData;
+                        processBuffer(state);
+                    }
+                }
+            };
+
+            this.addEventListener('progress', () => {
+                if ((this.readyState === 3 || this.readyState === 4) && this.responseText && this._mcpSSEState) {
+                    processSSEData();
+                }
+            });
+
+            // 【修复 v0.8 - Bug2】添加 load handler 刷新剩余缓冲区
+            // processBuffer 用 lines.pop() 保留最后一个不完整的行在 sseBuffer 中，
+            // 但如果流结束了，这个剩余行永远不会被处理。
+            // 在 load 事件中强制刷新：给 sseBuffer 加个换行符让它被处理。
+            this.addEventListener('load', () => {
+                if (this._mcpSSEState) {
+                    const state = this._mcpSSEState;
+                    // 先处理可能遗漏的最后一段 responseText
+                    if (this.responseText && state.processedIndex < this.responseText.length) {
+                        const newData = this.responseText.substring(state.processedIndex);
+                        state.sseBuffer += newData;
+                        state.processedIndex = this.responseText.length;
+                    }
+                    // 强制刷新剩余缓冲区（加换行让最后一行被处理）
+                    if (state.sseBuffer.trim()) {
+                        state.sseBuffer += '\n';
+                        processBuffer(state);
+                    }
+                    console.log('[MCP v0.8] 流结束，已刷新缓冲区。contentAccumulator长度:', state.contentAccumulator.length);
                 }
             });
 
             this.addEventListener('loadend', () => {
+                // 【修复 v0.8 - Bug3】在等待工具完成之前，再做一次最终检查
+                // 确保 load handler 中新发现的 marker 也被处理
+                if (this._mcpSSEState) {
+                    checkToolCalls(this._mcpSSEState);
+                }
+
                 let checkCount = 0;
                 const MAX_CHECKS = 240;
                 const finalCheck = setInterval(() => {

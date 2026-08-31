@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         DeepSeek qwen-code Enhanced Auto Send (Optimized + Direct Reply)
+// @name         DeepSeek qwen-code Enhanced Auto Send (Optimized + Direct Reply 0.6)
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      0.6
 // @description  SSE监控 + MCP客户端（优化start/end捕获，增加手动触发面板，支持直接回复，UI适配）
 // @author       Your Name
 // @match        https://chat.deepseek.com/*

@@ -89,7 +89,7 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
                 return;
             }
 
-            const match = rawText.match(/start:\s*({[\s\S]*?})\s*end/);
+            const match = rawText.match(/start:?\s*({[\s\S]*?})\s*end/);
             if (!match) {
                 msgDiv.style.color = '#f87171';
                 msgDiv.textContent = '格式错误，请确保包含 start:{...}end';
@@ -235,16 +235,39 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
 
     function findToolCallMarkers(text) {
         const markers = [];
-        const startRegex = /start:\s*({[\s\S]*?})\s*end(?!\w)/g;
-        let match;
-        while ((match = startRegex.exec(text)) !== null) {
-            const fullMatch = match[0];
-            const jsonContent = match[1];
-            const startIndex = match.index;
-            const endIndex = startIndex + fullMatch.length;
+        // 用 startTag 正则定位 "start" 或 "start:" 后的 '{'，然后用花括号计数法精确提取完整 JSON
+        const startTagRegex = /start:?\s*\{/g;
+        let tagMatch;
+        while ((tagMatch = startTagRegex.exec(text)) !== null) {
+            const startIndex = tagMatch.index;
+            // 找到 '{' 的位置，开始花括号计数
+            const braceStart = text.indexOf('{', tagMatch.index);
+            if (braceStart === -1) continue;
+
+            let depth = 0;
+            let jsonEnd = -1;
+            for (let i = braceStart; i < text.length; i++) {
+                if (text[i] === '{') depth++;
+                else if (text[i] === '}') {
+                    depth--;
+                    if (depth === 0) { jsonEnd = i + 1; break; }
+                }
+            }
+            if (jsonEnd === -1) continue;
+
+            // 检查 '}' 后面是否紧跟 'end'（允许中间有空白）
+            const afterBrace = text.substring(jsonEnd);
+            const endMatch = afterBrace.match(/^\s*end(?!\w)/);
+            if (!endMatch) continue;
+
+            const endIndex = jsonEnd + endMatch[0].length;
+            const jsonContent = text.substring(braceStart, jsonEnd);
+
             try {
                 const parsedArgs = JSON.parse(jsonContent);
                 markers.push({ start: startIndex, end: endIndex, jsonContent: parsedArgs });
+                // 跳到当前 marker 结束之后继续搜索，避免重叠匹配
+                startTagRegex.lastIndex = endIndex;
             } catch (e) {
                 console.warn("发现无效JSON格式的start/end块:", jsonContent);
             }
@@ -259,7 +282,9 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
 
         if (newMarkers.length > 0) console.log(`[MCP] 检测到 ${newMarkers.length} 个新工具调用`);
 
-        for (const marker of newMarkers) {
+        // 【关键修复】从后往前处理 marker，替换后面的不影响前面的位置
+        for (let i = newMarkers.length - 1; i >= 0; i--) {
+            const marker = newMarkers[i];
             const toolData = marker.jsonContent;
             if (!toolData || !toolData.name) continue;
 
@@ -268,7 +293,15 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
 
             const replacement = `\n[PROCESSED_MCP_CALL:${toolData.name}]\n`;
             state.contentAccumulator = state.contentAccumulator.substring(0, marker.start) + replacement + state.contentAccumulator.substring(marker.end);
-            state.lastProcessedIndex = marker.start + replacement.length;
+        }
+        // 更新 lastProcessedIndex：重新扫描，找到第一个未处理的 marker 位置
+        if (newMarkers.length > 0) {
+            const recheck = findToolCallMarkers(state.contentAccumulator);
+            if (recheck.length === 0) {
+                state.lastProcessedIndex = state.contentAccumulator.length;
+            } else {
+                state.lastProcessedIndex = recheck[0].start;
+            }
         }
 
         const MAX_BUFFER = 2 * 1024 * 1024;

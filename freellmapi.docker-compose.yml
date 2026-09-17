@@ -9,7 +9,7 @@ services:
     # Bound to localhost by default — FreeLLMAPI is single-user and must not
     # be exposed to the internet. Set HOST_BIND=0.0.0.0 in .env for LAN access.
     ports:
-      - "${HOST_BIND:-127.0.0.1}:${PORT:-3001}:3001"
+      - "${HOST_BIND:- 0.0.0.0}:${PORT:-3001}:3001"
     volumes:
       - /vol1/1000/Docker/freellmapi/data:/app/server/data
     restart: unless-stopped
@@ -19,7 +19,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:3001/api/ping').then((res) => { if (!res.ok) process.exit(1); }).catch(() => process.exit(1));"
+          "fetch('http://0.0.0.0:3001/api/ping').then((res) => { if (!res.ok) process.exit(1); }).catch(() => process.exit(1));"
         ]
       interval: 30s
       timeout: 5s

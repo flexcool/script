@@ -209,7 +209,7 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
             if (sendButtons.length > 0) {
                 sendButtons[0].click();
             } else {
-                textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
+                textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: false, bubbles: true }));
             }
             setTimeout(() => { window.isAutoSending = false; }, 300);
         }, 300);
@@ -568,19 +568,22 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
                 if (this._mcpSSEState) {
                     checkToolCalls(this._mcpSSEState);
                 }
-
-                let checkCount = 0;
-                const MAX_CHECKS = 240;
-                const finalCheck = setInterval(() => {
-                    checkCount++;
-                    if (activeToolCalls.length === 0 || checkCount >= MAX_CHECKS) {
-                        clearInterval(finalCheck);
-                        if (window.commandResults) {
-                            hideOverlay();
-                            simulateTypeAndSend(window.MCP_SEND_PLACEHOLDER);
+                console.log('[MCP v0.8] 流结束，最终检查');
+                setTimeout(() => {
+                    let checkCount = 0;
+                    const MAX_CHECKS = 240;
+                    const finalCheck = setInterval(() => {
+                        checkCount++;
+                        if (activeToolCalls.length === 0 || checkCount >= MAX_CHECKS) {
+                            clearInterval(finalCheck);
+                            if (window.commandResults) {
+                                hideOverlay();
+                                console.log('[MCP v0.8] 流结束，发送回复');
+                                simulateTypeAndSend(window.MCP_SEND_PLACEHOLDER);
+                            }
                         }
-                    }
-                }, 500);
+                    }, 500);
+                 }, 300);
             });
         }
         return originalSend.call(this, body);

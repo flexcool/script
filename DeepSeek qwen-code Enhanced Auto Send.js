@@ -1,7 +1,8 @@
+
 // ==UserScript==
-// @name         DeepSeek qwen-code Enhanced Auto Send 1.0
+// @name         DeepSeek qwen-code Enhanced Auto Send 1.1
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  SSE监控 + MCP客户端（优化start/end捕获，增加手动触发面板，支持直接回复，UI适配）
 // @author       Your Name
 // @match        https://chat.deepseek.com/*
@@ -89,15 +90,43 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
                 return;
             }
 
-            const match = rawText.match(/start:\s*({[\s\S]*?})\s*end/);
-            if (!match) {
+            // [优化] 使用parseJson替代正则表达式匹配start:{...}end
+            const startIdx = rawText.indexOf('start:');
+            if (startIdx === -1) {
                 msgDiv.style.color = '#f87171';
                 msgDiv.textContent = '格式错误，请确保包含 start:{...}end';
                 return;
             }
 
+            // 定位 '{'
+            let braceIdx = startIdx + 6;
+            while (braceIdx < rawText.length && rawText[braceIdx] === ' ') braceIdx++;
+
+            if (braceIdx >= rawText.length || rawText[braceIdx] !== '{') {
+                msgDiv.style.color = '#f87171';
+                msgDiv.textContent = '格式错误，请确保包含 start:{...}end';
+                return;
+            }
+
+            const jsonResult = parseJson(rawText, braceIdx);
+            if (!jsonResult) {
+                msgDiv.style.color = '#f87171';
+                msgDiv.textContent = '格式错误，JSON解析失败';
+                return;
+            }
+
+            // 检查 'end' 关键字
+            let endIdx = jsonResult.endIndex;
+            while (endIdx < rawText.length && rawText[endIdx] === ' ') endIdx++;
+
+            if (rawText.substring(endIdx, endIdx + 3) !== 'end') {
+                msgDiv.style.color = '#f87171';
+                msgDiv.textContent = '格式错误，缺少 end 标记';
+                return;
+            }
+
             try {
-                const toolData = JSON.parse(match[1]);
+                const toolData = jsonResult.value;
                 if (!toolData.name) throw new Error('缺少 name 字段');
 
                 msgDiv.style.color = '#60a5fa';
@@ -231,27 +260,99 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
         });
     }
 
-    // ================= [核心优化] 工具调用检测逻辑 =================
+    // ================= [优化] JSON解析辅助函数：基于括号深度追踪，正确处理嵌套对象和字符串中的括号 =================
     let activeToolCalls = [];
-
-    function findToolCallMarkers(text) {
-        const markers = [];
-        const startRegex = /start:\s*({[\s\S]*?})\s*end(?!\w)/g;
-        let match;
-        while ((match = startRegex.exec(text)) !== null) {
-            const fullMatch = match[0];
-            const jsonContent = match[1];
-            const startIndex = match.index;
-            const endIndex = startIndex + fullMatch.length;
-            try {
-                const parsedArgs = JSON.parse(jsonContent);
-                markers.push({ start: startIndex, end: endIndex, jsonContent: parsedArgs });
-            } catch (e) {
-                console.warn("发现无效JSON格式的start/end块:", jsonContent);
+    function parseJson(text, startIndex) {
+        const firstBrace = text.indexOf('{', startIndex);
+        if (firstBrace < 0) return null;
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+        for (let i = firstBrace; i < text.length; i++) {
+            const c = text[i];
+            if (inString) {
+                if (escaped) { escaped = false; }
+                else if (c === '\\') { escaped = true; }
+                else if (c === '"') { inString = false; }
+                continue;
+            }
+            if (c === '"') { inString = true; continue; }
+            if (c === '{') { depth++; }
+            else if (c === '}') {
+                depth--;
+                if (depth === 0) {
+                    const jsonText = text.substring(firstBrace, i + 1);
+                    try { return { value: JSON.parse(jsonText), endIndex: i + 1 }; }
+                    catch (e) { return null; }
+                }
             }
         }
+        return null;
+    }
+
+    // ================= [核心优化] 工具调用检测逻辑 - 使用parseJson精确捕获start{}end =================
+    function findToolCallMarkers(text) {
+        const markers = [];
+        let searchStart = 0;
+
+        while (true) {
+            // 查找 'start:' 关键字
+            const startKeywordIndex = text.indexOf('start:', searchStart);
+            if (startKeywordIndex < 0) break;
+
+            // 定位 '{' 的位置（跳过 'start:' 后的空白字符）
+            let braceIndex = startKeywordIndex + 6; // 'start:' 长度
+            while (braceIndex < text.length && text[braceIndex] === ' ') {
+                braceIndex++;
+            }
+
+            if (braceIndex >= text.length || text[braceIndex] !== '{') {
+                searchStart = startKeywordIndex + 1;
+                continue;
+            }
+
+            // 使用 parseJson 精确找到匹配的 '}'（正确处理嵌套对象和字符串中的括号）
+            const jsonResult = parseJson(text, braceIndex);
+            if (!jsonResult) {
+                searchStart = startKeywordIndex + 1;
+                continue;
+            }
+
+            const jsonEndIndex = jsonResult.endIndex; // '}' 之后的位置（不包含'}'）
+
+            // 检查 '}' 后是否有 'end' 关键字（允许中间有空白字符）
+            let endKeywordIndex = jsonEndIndex;
+            while (endKeywordIndex < text.length && text[endKeywordIndex] === ' ') {
+                endKeywordIndex++;
+            }
+
+            if (text.substring(endKeywordIndex, endKeywordIndex + 3) === 'end') {
+                // 检查 'end' 后不跟单词字符（等价于正则的 (?!\w)）
+                const afterEnd = endKeywordIndex + 3;
+                if (afterEnd >= text.length || !/\w/.test(text[afterEnd])) {
+                    const fullMatchStart = startKeywordIndex;
+                    const fullMatchEnd = endKeywordIndex + 3;
+
+                    try {
+                        const parsedArgs = jsonResult.value;
+                        markers.push({
+                            start: fullMatchStart,
+                            end: fullMatchEnd,
+                            jsonContent: parsedArgs
+                        });
+                    } catch (e) {
+                        console.warn("发现无效JSON格式的start/end块:", text.substring(braceIndex, jsonEndIndex));
+                    }
+                }
+            }
+
+            // 继续搜索下一个 'start:'（从当前位置后一位开始，避免死循环）
+            searchStart = startKeywordIndex + 1;
+        }
+
         return markers;
     }
+
 
     function checkToolCalls(state) {
         const currentContent = state.contentAccumulator;
@@ -444,6 +545,7 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
                     }
                     // 强制处理缓冲区中剩余的所有内容
                     processBuffer(state, true);
+                    console.log(`监控SSE到： ${state.contentAccumulator} `);
                 }
             });
 

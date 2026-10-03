@@ -140,7 +140,7 @@ window.MCP_SEND_PLACEHOLDER = '发送命令xxxoooxxx';
                 if (result.success) {
                     replyText = result.result?.content?.[0]?.text || result.result?.stdout || JSON.stringify(result.result);
                     msgDiv.style.color = '#34d399';
-                    msgDiv.textContent = '✅ 执行成功，正在发送回复...';
+                    msgDiv.textContent = '✅ 执行成功，已发送回复...';
                 } else {
                     replyText = `❌ 工具 ${toolData.name} 执行失败: ${result.error}`;
                     msgDiv.style.color = '#f87171';

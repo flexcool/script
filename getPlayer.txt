@@ -1,0 +1,358 @@
+function getPlayerHTML(object) {
+        let videoList = object.related || [];
+        const title = (object.name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        const remark = (object.remark || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        const totalCount = videoList.length;
+        
+        // 按每50集分组
+        const GROUP_SIZE = 50;
+        const groups = [];
+        for (let i = 0; i < videoList.length; i += GROUP_SIZE) {
+            groups.push(videoList.slice(i, i + GROUP_SIZE));
+        }
+        
+        // 生成分组HTML
+        let groupsHtml = '';
+        for (let g = 0; g < groups.length; g++) {
+            const group = groups[g];
+            const startNum = g * GROUP_SIZE + 1;
+            const endNum = Math.min((g + 1) * GROUP_SIZE, totalCount);
+            
+            // 生成该组的剧集按钮
+            let groupEpisodesHtml = '';
+            for (let i = 0; i < group.length; i++) {
+                const episode = group[i];
+                const globalIndex = g * GROUP_SIZE + i;
+                let displayName = episode.name.replace(/[第集话]/g, '') || String(globalIndex + 1);
+                let safeUrl = episode.url.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                groupEpisodesHtml += `<div class="episode-item" data-url="${safeUrl}" data-index="${globalIndex}">${displayName}</div>`;
+            }
+            
+            // 默认第一组展开，其他折叠
+            const isExpanded = (g === 0) ? 'expanded' : '';
+            groupsHtml += `
+                <div class="episode-group ${isExpanded}" data-group="${g}">
+                    <div class="group-header" onclick="toggleGroup(${g})">
+                        <span class="group-arrow">▶</span>
+                        <span class="group-title">${startNum}-${endNum}集</span>
+                        <span class="group-count">${group.length}</span>
+                    </div>
+                    <div class="group-content" id="group_${g}">
+                        <div class="episode-grid">${groupEpisodesHtml}</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
+<title>${title}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:#0f0f1a;color:#eee;padding:0;margin:0;width:100%;}
+.video-wrapper{background:#000;width:100%;margin:0;padding:0;position:relative;}
+#videoPlayer{width:100%;height:240px;border:none;background:#000;display:block;object-fit:contain;}
+.error-overlay{position:absolute;bottom:10px;left:10px;right:10px;background:rgba(0,0,0,0.8);color:#ff6b6b;padding:8px;font-size:11px;border-radius:6px;display:none;z-index:10;}
+.info-card{background:#16213e;margin:0;overflow:hidden;width:100%;}
+.info-header{background:#0f3460;padding:10px 12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;}
+.info-header h2{font-size:14px;margin:0;}
+.info-header .arrow{font-size:12px;transition:transform 0.3s;}
+.info-header.collapsed .arrow{transform:rotate(-90deg);}
+.info-content{padding:8px 12px;border-top:1px solid #2c3e66;display:none;}
+.info-content p{font-size:12px;color:#aaa;margin:0;line-height:1.4;}
+.info-content.expanded{display:block;}
+.episode-list{background:#16213e;padding:10px;max-height:400px;overflow-y:auto;margin:0;width:100%;}
+.episode-list h3{font-size:13px;margin-bottom:8px;color:#ddd;}
+.episode-group{margin-bottom:8px;border-radius:6px;overflow:hidden;}
+.group-header{background:#0f3460;padding:6px 10px;cursor:pointer;display:flex;align-items:center;gap:8px;}
+.group-header:hover{background:#1a4a7a;}
+.group-arrow{font-size:10px;transition:transform 0.2s;}
+.episode-group.expanded .group-arrow{transform:rotate(90deg);}
+.group-title{font-size:12px;font-weight:500;}
+.group-count{font-size:10px;color:#aaa;margin-left:auto;}
+.group-content{display:none;padding:8px;background:#16213e;}
+.episode-group.expanded .group-content{display:block;}
+.episode-grid{display:flex;flex-wrap:wrap;gap:6px;}
+.episode-item{background:#2c3e66;padding:5px 8px;border-radius:6px;cursor:pointer;font-size:12px;transition:all 0.2s;min-width:40px;text-align:center;}
+.episode-item:hover{background:#e74c3c;transform:scale(1.02);}
+.episode-item.active{background:#e74c3c;}
+.loading-tip{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;background:rgba(0,0,0,0.6);padding:6px 12px;border-radius:20px;font-size:12px;display:none;}
+</style>
+<!-- 引入 HLS.js -->
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+</head>
+<body>
+<div class="video-wrapper">
+<video id="videoPlayer" controls playsinline preload="metadata"></video>
+<div class="error-overlay" id="errorOverlay"></div>
+<div class="loading-tip" id="loadingTip">加载中...</div>
+</div>
+<div class="info-card">
+<div class="info-header" onclick="toggleRemark()">
+<h2>📋 ${remark}</h2>
+<span class="arrow">▼</span>
+</div>
+<div class="info-content" id="remarkContent">
+<p>${title || '暂无简介'}</p>
+</div>
+</div>
+<div class="episode-list">
+<h3>📺 剧集列表 (共${totalCount}集)</h3>
+${groupsHtml}
+</div>
+<script>
+// HLS 播放器实例
+var hlsInstance = null;
+var videoPlayer = document.getElementById('videoPlayer');
+var remarkContent = document.getElementById('remarkContent');
+var infoHeader = document.querySelector('.info-header');
+var errorOverlay = document.getElementById('errorOverlay');
+var loadingTip = document.getElementById('loadingTip');
+
+remarkContent.classList.remove('expanded');
+infoHeader.classList.add('collapsed');
+
+function toggleRemark() {
+    var content = document.getElementById('remarkContent');
+    var header = document.querySelector('.info-header');
+    if (content.classList.contains('expanded')) {
+        content.classList.remove('expanded');
+        header.classList.add('collapsed');
+    } else {
+        content.classList.add('expanded');
+        header.classList.remove('collapsed');
+    }
+}
+
+function toggleGroup(groupId) {
+    var group = document.querySelector('.episode-group[data-group="' + groupId + '"]');
+    if (group) group.classList.toggle('expanded');
+}
+
+// 隐藏错误提示
+function hideError() {
+    errorOverlay.style.display = 'none';
+    errorOverlay.innerHTML = '';
+}
+
+// 显示错误提示
+function showError(msg) {
+    errorOverlay.innerHTML = msg;
+    errorOverlay.style.display = 'block';
+    setTimeout(function() {
+        if (errorOverlay.innerHTML === msg) {
+            errorOverlay.style.display = 'none';
+        }
+    }, 5000);
+}
+
+// 设置加载状态
+function setLoading(loading) {
+    loadingTip.style.display = loading ? 'flex' : 'none';
+}
+
+// 清理旧的 HLS 实例
+function destroyHls() {
+    if (hlsInstance) {
+        try {
+            hlsInstance.destroy();
+        } catch(e) {}
+        hlsInstance = null;
+    }
+}
+
+// 使用 HLS.js 播放 m3u8
+function playM3u8WithHls(url) {
+    return new Promise(function(resolve, reject) {
+        // 清理旧实例
+        destroyHls();
+        
+        // 暂停当前播放
+        videoPlayer.pause();
+        videoPlayer.src = '';
+        
+        // 检查浏览器原生支持 (Safari)
+        if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
+            videoPlayer.src = url;
+            videoPlayer.addEventListener('loadedmetadata', function onLoad() {
+                videoPlayer.removeEventListener('loadedmetadata', onLoad);
+                resolve();
+            });
+            videoPlayer.addEventListener('error', function onErr() {
+                videoPlayer.removeEventListener('error', onErr);
+                reject(new Error('原生播放失败'));
+            });
+            return;
+        }
+        
+        // 使用 HLS.js
+        if (Hls && Hls.isSupported()) {
+            var config = {
+                enableWorker: true,
+                lowLatencyMode: false,
+                maxBufferLength: 30,
+                maxMaxBufferLength: 60,
+                liveSyncDurationCount: 3,
+                // 针对 Webview 环境优化
+                xhrSetup: function(xhr, xhrUrl) {
+                    // 如果 m3u8 地址跨域，可以添加 headers
+                    // xhr.setRequestHeader('Origin', location.origin);
+                }
+            };
+            
+            hlsInstance = new Hls(config);
+            hlsInstance.loadSource(url);
+            hlsInstance.attachMedia(videoPlayer);
+            
+            // 监听就绪
+            hlsInstance.on(Hls.Events.MANIFEST_PARSED, function() {
+                resolve();
+            });
+            
+            // 监听错误
+            hlsInstance.on(Hls.Events.ERROR, function(event, data) {
+                if (data.fatal) {
+                    switch(data.type) {
+                        case Hls.ErrorTypes.NETWORK_ERROR:
+                            reject(new Error('网络错误: ' + (data.details || '')));
+                            break;
+                        case Hls.ErrorTypes.MEDIA_ERROR:
+                            // 尝试恢复
+                            if (hlsInstance) {
+                                hlsInstance.recoverMediaError();
+                                reject(new Error('媒体解码错误'));
+                            }
+                            break;
+                        default:
+                            reject(new Error('播放错误: ' + (data.details || '')));
+                            break;
+                    }
+                } else {
+                    // 非致命错误，仅记录
+                    console.warn('HLS警告:', data.details);
+                }
+            });
+            
+        } else {
+            reject(new Error('当前浏览器不支持 HLS 播放'));
+        }
+    });
+}
+
+// 判断是否为 m3u8 链接
+function isM3u8Url(url) {
+    if (!url) return false;
+    var lowerUrl = url.toLowerCase();
+    return lowerUrl.includes('.m3u8') || lowerUrl.includes('m3u8');
+}
+
+// 核心播放函数
+async function playVideoByUrl(url, index) {
+    hideError();
+    setLoading(true);
+    
+    try {
+        // 如果是 m3u8 链接，使用 HLS.js 播放
+        if (isM3u8Url(url)) {
+            await playM3u8WithHls(url);
+            console.log('HLS.js 解析成功:', url);
+        } else {
+            // 非 m3u8 链接（如 mp4），降级为直接播放
+            destroyHls();
+            videoPlayer.src = url;
+            await new Promise(function(resolve, reject) {
+                videoPlayer.addEventListener('canplay', function onCanPlay() {
+                    videoPlayer.removeEventListener('canplay', onCanPlay);
+                    resolve();
+                });
+                videoPlayer.addEventListener('error', function onErr() {
+                    videoPlayer.removeEventListener('error', onErr);
+                    reject(new Error('无法加载视频'));
+                });
+                videoPlayer.load();
+            });
+        }
+        
+        // 更新激活样式
+        var allItems = document.querySelectorAll('.episode-item');
+        for (var i = 0; i < allItems.length; i++) {
+            allItems[i].classList.remove('active');
+        }
+        var targetItem = document.querySelector('.episode-item[data-index="' + index + '"]');
+        if (targetItem) targetItem.classList.add('active');
+        
+        // 尝试自动播放
+        try {
+            await videoPlayer.play();
+        } catch(playErr) {
+            console.warn('自动播放被阻止，需要用户交互:', playErr);
+        }
+        
+    } catch(err) {
+        console.error('播放失败:', err);
+        showError('播放失败: ' + (err.message || '未知错误'));
+        
+        // 可选：降级到解析接口
+        // fallbackToParser(url, index);
+    } finally {
+        setLoading(false);
+    }
+}
+
+// 可选：降级方案 - 使用第三方解析接口
+function fallbackToParser(url, index) {
+    var parserUrl = '';
+    if (url.includes('lz-cdn') || url.includes('cdnlz')) {
+        parserUrl = 'https://lziplayer.com/?url=' + encodeURIComponent(url);
+    } else if (isM3u8Url(url)) {
+        parserUrl = 'https://www.iqiyizyjx.com/?url=' + encodeURIComponent(url);
+    }
+    if (parserUrl) {
+        console.log('降级使用解析接口:', parserUrl);
+        destroyHls();
+        videoPlayer.src = parserUrl;
+        videoPlayer.play().catch(function(e) {});
+    }
+}
+
+// 集数切换
+var episodeItems = document.querySelectorAll('.episode-item');
+var allUrls = [];
+var currentIndex = 0;
+
+for (var i = 0; i < episodeItems.length; i++) {
+    var url = episodeItems[i].getAttribute('data-url');
+    var idx = parseInt(episodeItems[i].getAttribute('data-index'));
+    allUrls[idx] = url;
+    episodeItems[i].addEventListener('click', (function(url, idx) {
+        return function() { 
+            currentIndex = idx;
+            playVideoByUrl(url, idx); 
+        };
+    })(url, idx));
+}
+
+function playNext() {
+    var nextIndex = (currentIndex + 1);
+    if (nextIndex < allUrls.length && allUrls[nextIndex]) {
+        currentIndex = nextIndex;
+        playVideoByUrl(allUrls[currentIndex], currentIndex);
+    }
+}
+
+videoPlayer.onended = function() {
+    playNext();
+};
+
+// 自动播放第一集
+if (allUrls[0]) {
+    currentIndex = 0;
+    playVideoByUrl(allUrls[0], 0);
+}
+</script>
+</body>
+</html>`;
+    }
